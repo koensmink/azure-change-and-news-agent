@@ -23,6 +23,8 @@ def build_digest(hours: int = 24, security_only: bool = True, ga_only: bool = Tr
     }
 
 def row_to_item(r: dict) -> dict:
+    audience = r.get("audience")
+    content_angle = r.get("content_angle")
     return {
         "event_id": r["event_id"],
         "change_type": r.get("change_type"),
@@ -39,4 +41,33 @@ def row_to_item(r: dict) -> dict:
         "category": r.get("category"),
         "impact": r.get("impact"),
         "recommended_action": r.get("recommended_action"),
+        "marketing_relevant": bool(r.get("marketing_relevant")),
+        "marketing_category": r.get("marketing_category"),
+        "audience": json.loads(audience) if isinstance(audience, str) and audience else (audience or []),
+        "content_angle": json.loads(content_angle) if isinstance(content_angle, str) and content_angle else (content_angle or []),
+        "marketing_action": r.get("marketing_action"),
+        "technical_depth": r.get("technical_depth"),
+        "urgency": r.get("urgency"),
+        "customer_impact": r.get("customer_impact"),
+        "risk_of_overclaiming": r.get("risk_of_overclaiming"),
+        "publication_guardrail": r.get("publication_guardrail"),
     }
+
+
+def build_marketing_digest(hours: int = 24, ga_only: bool = False, limit: int = 300):
+    payload = build_digest(hours=hours, security_only=True, ga_only=ga_only, limit=limit)
+    items = [it for it in payload["items"] if it.get("marketing_relevant")]
+    grouped = {
+        "publishable": [],
+        "customer_advisory": [],
+        "internal_awareness": [],
+        "review_required": [],
+    }
+    for it in items:
+        grouped.setdefault(it.get("marketing_category") or "internal_awareness", []).append(it)
+
+    payload["digest_type"] = "microsoft_security_marketing_digest"
+    payload["count"] = len(items)
+    payload["items"] = items
+    payload["grouped"] = grouped
+    return payload

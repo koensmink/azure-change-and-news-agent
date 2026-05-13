@@ -7,7 +7,7 @@ from .api import app
 from .config import RUN_SCHEDULE_CRON, PORT, INCLUDE_SOURCES, DEFAULT_GA_ONLY
 from .db import init_db, upsert_event
 from .normalize import make_event_id, make_content_hash, stable_url
-from .classify import classify_security
+from .classify import classify_security, classify_marketing
 
 # sources
 from .sources import graph_message_center, m365_roadmap, intune_whatsnew, defender_whatsnew, entra_whatsnew, azure_updates
@@ -82,6 +82,7 @@ def ingest_detail(detail: dict) -> int:
 
     # Security classification
     detail = classify_security(detail)
+    detail = classify_marketing(detail)
 
     # Persist (DB determines NEW/CHANGED/UNCHANGED)
     change_type = upsert_event(detail)

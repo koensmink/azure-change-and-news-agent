@@ -5,7 +5,7 @@ from fastapi.responses import HTMLResponse
 
 from .config import DEFAULT_GA_ONLY
 from .db import init_db, query_events
-from .digest import build_digest
+from .digest import build_digest, build_marketing_digest
 
 app = FastAPI(title="Microsoft Changes Collector", version="1.0")
 
@@ -38,6 +38,15 @@ def digest(
     limit: int = Query(200, ge=1, le=500),
 ):
     return build_digest(hours=hours, security_only=security_only, ga_only=ga_only, limit=limit)
+
+
+@app.get("/digest/marketing")
+def digest_marketing(
+    hours: int = Query(24, ge=1, le=168),
+    ga_only: bool = Query(False),
+    limit: int = Query(300, ge=1, le=1000),
+):
+    return build_marketing_digest(hours=hours, ga_only=ga_only, limit=limit)
 
 
 @app.get("/events/web", response_class=HTMLResponse)

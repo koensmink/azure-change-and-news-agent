@@ -55,6 +55,7 @@ def init_db():
             conn.execute("CREATE INDEX IF NOT EXISTS idx_events_published ON events(published_at);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_events_source ON events(source);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_events_stage ON events(release_stage);")
+            _ensure_marketing_columns(conn)
             conn.commit()
             return
 
@@ -89,6 +90,39 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_events_published ON events(published_at);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_events_source ON events(source);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_events_stage ON events(release_stage);")
+        _ensure_marketing_columns(conn)
+
+
+def _ensure_marketing_columns(conn):
+    if IS_POSTGRES:
+        conn.execute("ALTER TABLE events ADD COLUMN IF NOT EXISTS marketing_relevant INTEGER;")
+        conn.execute("ALTER TABLE events ADD COLUMN IF NOT EXISTS marketing_category TEXT;")
+        conn.execute("ALTER TABLE events ADD COLUMN IF NOT EXISTS audience TEXT;")
+        conn.execute("ALTER TABLE events ADD COLUMN IF NOT EXISTS content_angle TEXT;")
+        conn.execute("ALTER TABLE events ADD COLUMN IF NOT EXISTS marketing_action TEXT;")
+        conn.execute("ALTER TABLE events ADD COLUMN IF NOT EXISTS technical_depth TEXT;")
+        conn.execute("ALTER TABLE events ADD COLUMN IF NOT EXISTS urgency TEXT;")
+        conn.execute("ALTER TABLE events ADD COLUMN IF NOT EXISTS customer_impact TEXT;")
+        conn.execute("ALTER TABLE events ADD COLUMN IF NOT EXISTS risk_of_overclaiming TEXT;")
+        conn.execute("ALTER TABLE events ADD COLUMN IF NOT EXISTS publication_guardrail TEXT;")
+        return
+
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(events)").fetchall()}
+    sqlite_cols = {
+        "marketing_relevant": "INTEGER",
+        "marketing_category": "TEXT",
+        "audience": "TEXT",
+        "content_angle": "TEXT",
+        "marketing_action": "TEXT",
+        "technical_depth": "TEXT",
+        "urgency": "TEXT",
+        "customer_impact": "TEXT",
+        "risk_of_overclaiming": "TEXT",
+        "publication_guardrail": "TEXT",
+    }
+    for col, col_type in sqlite_cols.items():
+        if col not in cols:
+            conn.execute(f"ALTER TABLE events ADD COLUMN {col} {col_type};")
 
 
 def get_event(event_id: str):
@@ -125,8 +159,11 @@ def upsert_event(event: dict):
                   release_stage, published_at, updated_at,
                   security_relevant, security_reason, category,
                   impact, recommended_action,
+                  marketing_relevant, marketing_category, audience, content_angle,
+                  marketing_action, technical_depth, urgency, customer_impact,
+                  risk_of_overclaiming, publication_guardrail,
                   raw_json, last_seen_at, last_changed_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
                 ON CONFLICT(event_id) DO UPDATE SET
                   content_hash=EXCLUDED.content_hash,
                   change_type=%s,
@@ -142,6 +179,16 @@ def upsert_event(event: dict):
                   category=EXCLUDED.category,
                   impact=EXCLUDED.impact,
                   recommended_action=EXCLUDED.recommended_action,
+                  marketing_relevant=EXCLUDED.marketing_relevant,
+                  marketing_category=EXCLUDED.marketing_category,
+                  audience=EXCLUDED.audience,
+                  content_angle=EXCLUDED.content_angle,
+                  marketing_action=EXCLUDED.marketing_action,
+                  technical_depth=EXCLUDED.technical_depth,
+                  urgency=EXCLUDED.urgency,
+                  customer_impact=EXCLUDED.customer_impact,
+                  risk_of_overclaiming=EXCLUDED.risk_of_overclaiming,
+                  publication_guardrail=EXCLUDED.publication_guardrail,
                   raw_json=EXCLUDED.raw_json,
                   last_seen_at=NOW(),
                   last_changed_at={last_changed_expr};
@@ -165,6 +212,16 @@ def upsert_event(event: dict):
                     event.get("category", "Other"),
                     event.get("impact", "Unknown"),
                     event.get("recommended_action"),
+                    1 if event.get("marketing_relevant") else 0,
+                    event.get("marketing_category", "internal_awareness"),
+                    json.dumps(event.get("audience", [])),
+                    json.dumps(event.get("content_angle", [])),
+                    event.get("marketing_action"),
+                    event.get("technical_depth", "executive"),
+                    event.get("urgency", "low"),
+                    event.get("customer_impact"),
+                    event.get("risk_of_overclaiming", "medium"),
+                    event.get("publication_guardrail", "Security review required"),
                     json.dumps(event.get("raw", {})),
                     change_type,
                 ),
@@ -194,8 +251,11 @@ def upsert_event(event: dict):
               release_stage, published_at, updated_at,
               security_relevant, security_reason, category,
               impact, recommended_action,
+              marketing_relevant, marketing_category, audience, content_angle,
+              marketing_action, technical_depth, urgency, customer_impact,
+              risk_of_overclaiming, publication_guardrail,
               raw_json, last_seen_at, last_changed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
             ON CONFLICT(event_id) DO UPDATE SET
               content_hash=excluded.content_hash,
               change_type='{change_type}',
@@ -211,6 +271,16 @@ def upsert_event(event: dict):
               category=excluded.category,
               impact=excluded.impact,
               recommended_action=excluded.recommended_action,
+              marketing_relevant=excluded.marketing_relevant,
+              marketing_category=excluded.marketing_category,
+              audience=excluded.audience,
+              content_angle=excluded.content_angle,
+              marketing_action=excluded.marketing_action,
+              technical_depth=excluded.technical_depth,
+              urgency=excluded.urgency,
+              customer_impact=excluded.customer_impact,
+              risk_of_overclaiming=excluded.risk_of_overclaiming,
+              publication_guardrail=excluded.publication_guardrail,
               raw_json=excluded.raw_json,
               last_seen_at=datetime('now'),
               last_changed_at={last_changed_at_sql};
@@ -234,6 +304,16 @@ def upsert_event(event: dict):
                 event.get("category", "Other"),
                 event.get("impact", "Unknown"),
                 event.get("recommended_action"),
+                1 if event.get("marketing_relevant") else 0,
+                event.get("marketing_category", "internal_awareness"),
+                json.dumps(event.get("audience", [])),
+                json.dumps(event.get("content_angle", [])),
+                event.get("marketing_action"),
+                event.get("technical_depth", "executive"),
+                event.get("urgency", "low"),
+                event.get("customer_impact"),
+                event.get("risk_of_overclaiming", "medium"),
+                event.get("publication_guardrail", "Security review required"),
                 json.dumps(event.get("raw", {})),
             ),
         )
