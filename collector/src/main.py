@@ -4,10 +4,11 @@ from datetime import datetime, timezone
 from croniter import croniter
 
 from .api import app
-from .config import RUN_SCHEDULE_CRON, PORT, INCLUDE_SOURCES, DEFAULT_GA_ONLY
+from .config import RUN_SCHEDULE_CRON, PORT, INCLUDE_SOURCES
 from .db import init_db, upsert_event
 from .normalize import make_event_id, make_content_hash, stable_url
-from .classify import classify_security
+from .classify import classify_security, classify_microsoft_relevance
+from .source_registry import SOURCE_DEFINITIONS
 
 # sources
 from .sources import graph_message_center, m365_roadmap, intune_whatsnew, defender_whatsnew, entra_whatsnew, azure_updates
@@ -15,52 +16,28 @@ from .sources import graph_message_center, m365_roadmap, intune_whatsnew, defend
 import uvicorn
 
 def ingest_source(source_name: str) -> int:
+    definition = SOURCE_DEFINITIONS.get(source_name)
+    if not definition:
+        return 0
+
     count = 0
-
-    if source_name == "graph_message_center":
-        index = graph_message_center.fetch_index()
-        for msg in index:
-            detail = graph_message_center.enrich_detail(msg)
-            count += ingest_detail(detail)
-        return count
-
-    if source_name == "m365_roadmap":
-        res = m365_roadmap.fetch_index()
-        mode = res["mode"]
-        for item in res["items"]:
+    index_payload = definition.fetch_index()
+    if isinstance(index_payload, dict) and source_name == "m365_roadmap":
+        mode = index_payload.get("mode", "json")
+        items = index_payload.get("items", [])
+        for item in items[: definition.max_items]:
             detail = m365_roadmap.enrich_detail(item, mode=mode)
+            detail["source_confidence"] = definition.confidence
+            detail["source_owner"] = definition.owner
             count += ingest_detail(detail)
         return count
 
-    if source_name == "intune_whatsnew":
-        index = intune_whatsnew.fetch_index()
-        for it in index[:80]:
-            detail = intune_whatsnew.enrich_detail(it)
-            count += ingest_detail(detail)
-        return count
-
-    if source_name == "defender_whatsnew":
-        index = defender_whatsnew.fetch_index()
-        for it in index[:80]:
-            detail = defender_whatsnew.enrich_detail(it)
-            count += ingest_detail(detail)
-        return count
-
-    if source_name == "entra_whatsnew":
-        index = entra_whatsnew.fetch_index()
-        for it in index[:120]:
-            detail = entra_whatsnew.enrich_detail(it)
-            count += ingest_detail(detail)
-        return count
-
-    if source_name == "azure_updates":
-        index = azure_updates.fetch_index()
-        for it in index[:200]:
-            detail = azure_updates.enrich_detail(it)
-            count += ingest_detail(detail)
-        return count
-
-    return 0
+    for item in index_payload[: definition.max_items]:
+        detail = definition.enrich_detail(item)
+        detail["source_confidence"] = definition.confidence
+        detail["source_owner"] = definition.owner
+        count += ingest_detail(detail)
+    return count
 
 def ingest_detail(detail: dict) -> int:
     # Normalize + hashes
@@ -82,6 +59,10 @@ def ingest_detail(detail: dict) -> int:
 
     # Security classification
     detail = classify_security(detail)
+    detail = classify_microsoft_relevance(detail)
+
+    if not detail.get("microsoft_relevant"):
+        return 0
 
     # Persist (DB determines NEW/CHANGED/UNCHANGED)
     change_type = upsert_event(detail)
