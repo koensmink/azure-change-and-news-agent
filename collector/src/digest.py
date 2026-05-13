@@ -39,4 +39,9 @@ def row_to_item(r: dict) -> dict:
         "category": r.get("category"),
         "impact": r.get("impact"),
         "recommended_action": r.get("recommended_action"),
+        "microsoft_relevant": bool(r.get("microsoft_relevant")),
+        "microsoft_relevance_reason": r.get("microsoft_relevance_reason"),
+        "affected_microsoft_products": json.loads(r.get("affected_microsoft_products") or "[]") if isinstance(r.get("affected_microsoft_products"), str) else (r.get("affected_microsoft_products") or []),
+        "source_confidence": r.get("source_confidence"),
+        "publication_guardrail": r.get("publication_guardrail"),
     }

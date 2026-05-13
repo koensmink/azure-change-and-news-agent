@@ -9,7 +9,7 @@ def env_bool(name: str, default: bool = False) -> bool:
 PORT = int(os.getenv("PORT", "8088"))
 RUN_SCHEDULE_CRON = os.getenv("RUN_SCHEDULE_CRON", "0 7 * * *")
 
-INCLUDE_SOURCES = [s.strip() for s in os.getenv("INCLUDE_SOURCES", "").split(",") if s.strip()]
+INCLUDE_SOURCES = [s.strip() for s in os.getenv("INCLUDE_SOURCES", "graph_message_center,m365_roadmap,intune_whatsnew,defender_whatsnew,entra_whatsnew,azure_updates,microsoft_security_blog,third_party_rss").split(",") if s.strip()]
 
 DEFAULT_GA_ONLY = env_bool("DEFAULT_GA_ONLY", True)
 

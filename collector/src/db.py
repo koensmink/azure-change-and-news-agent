@@ -45,6 +45,11 @@ def init_db():
                   category TEXT,
                   impact TEXT,
                   recommended_action TEXT,
+                  microsoft_relevant INTEGER,
+                  microsoft_relevance_reason TEXT,
+                  affected_microsoft_products TEXT,
+                  source_confidence TEXT,
+                  publication_guardrail TEXT,
                   raw_json TEXT,
                   first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                   last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -79,7 +84,12 @@ def init_db():
               category TEXT,
               impact TEXT,
               recommended_action TEXT,
-              raw_json TEXT,
+              microsoft_relevant INTEGER,
+                  microsoft_relevance_reason TEXT,
+                  affected_microsoft_products TEXT,
+                  source_confidence TEXT,
+                  publication_guardrail TEXT,
+                  raw_json TEXT,
               first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
               last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
               last_changed_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -125,6 +135,7 @@ def upsert_event(event: dict):
                   release_stage, published_at, updated_at,
                   security_relevant, security_reason, category,
                   impact, recommended_action,
+                  microsoft_relevant, microsoft_relevance_reason, affected_microsoft_products, source_confidence, publication_guardrail,
                   raw_json, last_seen_at, last_changed_at
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
                 ON CONFLICT(event_id) DO UPDATE SET
@@ -142,6 +153,11 @@ def upsert_event(event: dict):
                   category=EXCLUDED.category,
                   impact=EXCLUDED.impact,
                   recommended_action=EXCLUDED.recommended_action,
+                  microsoft_relevant=EXCLUDED.microsoft_relevant,
+                  microsoft_relevance_reason=EXCLUDED.microsoft_relevance_reason,
+                  affected_microsoft_products=EXCLUDED.affected_microsoft_products,
+                  source_confidence=EXCLUDED.source_confidence,
+                  publication_guardrail=EXCLUDED.publication_guardrail,
                   raw_json=EXCLUDED.raw_json,
                   last_seen_at=NOW(),
                   last_changed_at={last_changed_expr};
@@ -165,6 +181,11 @@ def upsert_event(event: dict):
                     event.get("category", "Other"),
                     event.get("impact", "Unknown"),
                     event.get("recommended_action"),
+                    1 if event.get("microsoft_relevant") else 0,
+                    event.get("microsoft_relevance_reason"),
+                    json.dumps(event.get("affected_microsoft_products", [])),
+                    event.get("source_confidence"),
+                    event.get("publication_guardrail"),
                     json.dumps(event.get("raw", {})),
                     change_type,
                 ),
@@ -194,6 +215,7 @@ def upsert_event(event: dict):
               release_stage, published_at, updated_at,
               security_relevant, security_reason, category,
               impact, recommended_action,
+              microsoft_relevant, microsoft_relevance_reason, affected_microsoft_products, source_confidence, publication_guardrail,
               raw_json, last_seen_at, last_changed_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
             ON CONFLICT(event_id) DO UPDATE SET
@@ -211,6 +233,11 @@ def upsert_event(event: dict):
               category=excluded.category,
               impact=excluded.impact,
               recommended_action=excluded.recommended_action,
+              microsoft_relevant=excluded.microsoft_relevant,
+              microsoft_relevance_reason=excluded.microsoft_relevance_reason,
+              affected_microsoft_products=excluded.affected_microsoft_products,
+              source_confidence=excluded.source_confidence,
+              publication_guardrail=excluded.publication_guardrail,
               raw_json=excluded.raw_json,
               last_seen_at=datetime('now'),
               last_changed_at={last_changed_at_sql};
@@ -234,6 +261,11 @@ def upsert_event(event: dict):
                 event.get("category", "Other"),
                 event.get("impact", "Unknown"),
                 event.get("recommended_action"),
+                1 if event.get("microsoft_relevant") else 0,
+                event.get("microsoft_relevance_reason"),
+                json.dumps(event.get("affected_microsoft_products", [])),
+                event.get("source_confidence"),
+                event.get("publication_guardrail"),
                 json.dumps(event.get("raw", {})),
             ),
         )
