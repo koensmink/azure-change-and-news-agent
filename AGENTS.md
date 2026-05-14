@@ -1,193 +1,693 @@
-# AGENTS.md addition: Microsoft Security Marketing Digest source scope
+# Codex task: Fix API/web result retrieval versus database state
 
-## Source scope
+## Context
 
-The marketing digest must not be limited to the sources currently implemented in the repository.
+This repository contains a Microsoft Azure/M365 change intelligence collector with a PostgreSQL-backed event store and web/API endpoints such as `/digest`.
 
-The system should be able to collect, normalize, and classify Microsoft-relevant security news from a broader set of sources, as long as the content is clearly applicable to Microsoft security, Microsoft cloud, Microsoft 365, Azure, Entra ID, Defender, Intune, Purview, Sentinel, Security Copilot, Windows security, or the Microsoft partner/security ecosystem.
+Database inspection confirms that relevant events are stored in PostgreSQL, but the web/API layer does not return the same results.
 
-The goal is to support the marketing department with relevant Microsoft security news, not to build a generic cybersecurity news aggregator.
+Observed database state:
 
-## Source selection principles
+- `events` table contains events from:
+  - `graph_message_center`
+  - `defender_whatsnew`
+  - `entra_whatsnew`
+  - `intune_whatsnew`
 
-Sources may include, but are not limited to:
+The table includes internal collector timestamps:
 
-- Official Microsoft blogs and documentation
-- Microsoft Security Blog
-- Microsoft Tech Community
-- Microsoft Learn release notes
-- Microsoft 365 Message Center
-- Microsoft 365 Roadmap
-- Microsoft Graph Service Communications API
-- Microsoft Partner Center announcements
-- Microsoft Security Response Center
-- Microsoft CVE/security update guidance
-- Microsoft Defender / Entra / Intune / Purview / Sentinel product updates
-- Security Copilot updates
-- Azure Updates
-- Relevant third-party security news when the topic directly affects Microsoft products or services
+- `first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+- `last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+- `last_changed_at TIMESTAMPTZ NOT NULL DEFAULT now()`
 
-Third-party sources are allowed only when the article is clearly Microsoft-specific or materially relevant to Microsoft security customers.
+The source timestamp fields are unreliable for filtering:
 
-Examples of allowed third-party topics:
+- `published_at TEXT`
+- `updated_at TEXT`
 
-- A vulnerability affecting Microsoft Exchange, SharePoint, Windows, Azure, Entra ID, or Microsoft 365
-- Threat actor activity targeting Microsoft 365 tenants
-- Phishing campaigns abusing Microsoft services
-- Security research about Microsoft identity, OAuth, Teams, OneDrive, SharePoint, or Azure
-- Public incidents or advisories involving Microsoft cloud or Microsoft security products
-- Regulatory or compliance changes that directly affect Microsoft security positioning
+Several sources have empty or NULL `published_at` and `updated_at`, so these fields must not be used as primary API time filters.
 
-Examples of sources that should normally be excluded:
+## Problem
 
-- Generic cybersecurity news without a Microsoft angle
-- Vendor marketing content that only compares against Microsoft without factual security relevance
-- Opinion pieces without verifiable technical claims
-- Unverified social media posts
-- Rumors without authoritative confirmation
-- General AI/security hype without a Microsoft product or customer impact angle
+The API/web layer does not reliably return the events that are visible in the database.
 
-## Source confidence and trust model
+Examples:
 
-Every collected item must include a source confidence classification.
+- Events can be queried directly from PostgreSQL using `last_seen_at`, `first_seen_at`, and `last_changed_at`.
+- The API returns fewer or no results for equivalent time windows.
+- The `hours` parameter does not appear to work correctly beyond 24 hours.
+- Calling with `hours=48` does not return items that are visible in the database for the past 48 hours.
+- Query parameters may be ignored, incorrectly parsed, capped, overwritten by defaults, or applied to the wrong timestamp fields.
+- Boolean query parameters such as `ga_only=false` and `security_only=false` may be parsed incorrectly as truthy strings.
+- API filtering may use source fields such as `published_at` or `updated_at`, which are text fields and often empty.
 
-Use the following levels:
+## Goal
 
-```json
-{
-  "source_confidence": "official_microsoft | official_government | trusted_security_vendor | reputable_news | community | unverified"
-}
+Fix the overall API result retrieval logic so that web/API responses match PostgreSQL state for equivalent filters.
+
+This is not limited to a single endpoint. Review all API endpoints that expose event or digest data and ensure they use the correct database fields, query parameters, filter order, and limits.
+
+## Required investigation
+
+Inspect the current implementation and identify:
+
+1. Where `/digest` and related endpoints are defined.
+2. Where query parameters are parsed.
+3. Whether `hours` is:
+   - ignored;
+   - capped at 24;
+   - parsed as string;
+   - overwritten by a default;
+   - rejected silently;
+   - applied after limiting;
+   - applied to the wrong timestamp field.
+4. Whether boolean query parameters are parsed safely.
+5. Whether the API queries `published_at` or `updated_at` instead of internal timestamp fields.
+6. Whether results are limited before filtering.
+7. Whether filters are applied in Python after a too-small database query.
+8. Whether `limit` defaults are hiding valid results.
+9. Whether sorting causes older or irrelevant records to be selected before filtering.
+10. Whether API and collector use the same database/schema.
+11. Whether the web container points to a different database than the one inspected manually.
+12. Whether timezone-aware UTC datetime handling is consistent.
+
+## Critical requirement: database/API consistency
+
+For every supported API filter, the API result count must match the equivalent SQL count, except where an explicit `limit` is applied.
+
+Example:
+
+```sql
+SELECT COUNT(*)
+FROM events
+WHERE last_seen_at >= NOW() - INTERVAL '48 hours';
 ```
 
-Apply the following rules:
+must align with:
 
-- `official_microsoft` is preferred for publication.
-- `official_government` may be used for vulnerability, threat, or regulatory context.
-- `trusted_security_vendor` may be used when the content is technically specific and Microsoft-relevant.
-- `reputable_news` may be used for public incident or market context.
-- `community` content must normally be marked as `review_required`.
-- `unverified` content must not be marked as publishable.
-
-## Microsoft relevance classification
-
-Add or extend classification logic with a dedicated Microsoft relevance field.
-
-Example event fields:
-
-```json
-{
-  "microsoft_relevant": true,
-  "microsoft_relevance_reason": "The item describes a phishing campaign targeting Microsoft 365 tenants.",
-  "affected_microsoft_products": [
-    "Microsoft 365",
-    "Exchange Online",
-    "Microsoft Defender for Office 365"
-  ]
-}
+```http
+GET /digest?hours=48&time_mode=seen&ga_only=false&security_only=false&limit=1000
 ```
 
-An item should only be included in the marketing digest when:
+If the SQL count is 119 and the API limit is 1000, the API count must be 119.
+
+## Time filtering model
+
+Use internal collector timestamps for API time filtering.
+
+Do not use `published_at` or `updated_at` as the primary API time-window fields.
+
+Supported time modes:
+
+| time_mode | Field / logic |
+|---|---|
+| `changed` | `last_changed_at >= cutoff` |
+| `new` | `first_seen_at >= cutoff` |
+| `seen` | `last_seen_at >= cutoff` |
+| `new_or_changed` | `first_seen_at >= cutoff OR last_changed_at >= cutoff` |
+
+Default behavior:
 
 ```text
-microsoft_relevant = true
+time_mode=changed
 ```
 
-or when it has a clear manually configured allowlist reason.
+This preserves a strict change-digest behavior and avoids returning old items every collector run.
 
-## Required filtering behavior
+However, `time_mode=seen` must work for troubleshooting/source validation.
 
-The system must distinguish between:
+## Hours parameter
 
-1. Microsoft-owned source
-2. Microsoft-specific topic from a third-party source
-3. Generic security topic with weak Microsoft relevance
+The `hours` parameter must be fully functional.
 
-Only categories 1 and 2 should be included by default.
+Requirements:
 
-Category 3 should be excluded unless explicitly requested.
+- Parse `hours` as integer.
+- Default to existing default or `24`.
+- Allow at least values from `1` to `168`.
+- Do not silently cap to `24`.
+- Do not ignore values greater than `24`.
+- If the implementation requires a maximum, document it and return HTTP 400 when exceeded.
+- Invalid values must return HTTP 400.
 
-## Marketing digest goal
+Accepted examples:
 
-The digest is intended for the marketing department and should focus on Microsoft-related security topics that can support:
+```http
+/digest?hours=1
+/digest?hours=24
+/digest?hours=48
+/digest?hours=72
+/digest?hours=168
+```
 
-- LinkedIn content
-- blog planning
-- customer advisories
-- campaign triggers
-- sales enablement
-- Microsoft security proposition messaging
-- security awareness content
-- partner positioning
+Expected cutoff logic:
 
-The output should translate technical Microsoft security updates into clear marketing relevance.
+```python
+cutoff = now_utc - timedelta(hours=hours)
+```
 
-It should not produce generic SOC, threat intelligence, or vulnerability reporting unless the Microsoft relevance is explicit.
+The response must include the computed cutoff.
 
-## Publication guardrails for non-Microsoft sources
+## Query parameter parsing
 
-For third-party sources, apply stricter publication guardrails.
+Implement strict parsing helpers if not already present.
 
-Rules:
+### Integer parsing
 
-- Do not mark third-party content as `publishable` unless the Microsoft relevance is explicit and the technical claim is verifiable.
-- Prefer `review_required` for third-party research, vendor blogs, and community posts.
-- If the item discusses a vulnerability, exploit, incident, or breach, require security review before external publication.
-- If Microsoft has not confirmed the claim, include that limitation in the output.
-- If source confidence is `community` or `unverified`, do not recommend external publication.
+For `hours` and `limit`:
 
-Example guardrail:
+- Convert to integer.
+- Reject non-integer values.
+- Reject zero or negative values.
+- Return HTTP 400 with clear error details.
+
+### Boolean parsing
+
+Do not rely on Python truthiness for strings.
+
+This is wrong:
+
+```python
+bool("false") == True
+```
+
+Accepted true values:
+
+```text
+true, 1, yes, on
+```
+
+Accepted false values:
+
+```text
+false, 0, no, off
+```
+
+Parameters that need strict boolean parsing:
+
+- `security_only`
+- `ga_only`
+- `marketing_only`
+- `include_review_required`
+- `debug`, if present
+
+Invalid values must return HTTP 400.
+
+## Required filter order
+
+Apply filters in this order:
+
+1. Time-window filter using internal timestamp field and `time_mode`
+2. `security_only`
+3. `ga_only`
+4. `marketing_only`, if present
+5. `include_review_required`, if present
+6. Sorting
+7. `limit`
+
+Important: do not apply `limit` before filters.
+
+Bad pattern:
+
+```python
+events = query.limit(limit).all()
+events = filter_by_time(events)
+```
+
+Good pattern:
+
+```python
+query = query.filter(time_condition)
+query = query.filter(optional_filters)
+query = query.order_by(...)
+query = query.limit(limit)
+```
+
+## Sorting rules
+
+Sort by the relevant timestamp for the selected time mode.
+
+| time_mode | Sort |
+|---|---|
+| `changed` | `last_changed_at DESC` |
+| `new` | `first_seen_at DESC` |
+| `seen` | `last_seen_at DESC` |
+| `new_or_changed` | `GREATEST(first_seen_at, last_changed_at) DESC` |
+
+If the database abstraction does not support `GREATEST`, perform equivalent logic safely in Python after selecting all candidate records for the requested window.
+
+## Response metadata
+
+All digest/event API responses must expose enough metadata to troubleshoot filtering.
+
+Top-level response must include:
 
 ```json
 {
-  "publication_guardrail": "Security review required. Third-party source; validate against Microsoft or authoritative advisory before publication."
+  "generated_at": "2026-05-14T19:00:00Z",
+  "window_hours": 48,
+  "time_mode": "seen",
+  "cutoff": "2026-05-12T19:00:00Z",
+  "security_only": false,
+  "ga_only": false,
+  "marketing_only": false,
+  "limit": 1000,
+  "count": 119
 }
 ```
 
-## Additional source discovery
+Each item must include:
 
-When implementing new collectors, design the source layer so additional Microsoft-relevant sources can be added without large refactoring.
-
-Preferred approach:
-
-- Config-driven source definitions where possible
-- Clear source type metadata
-- Per-source parser/normalizer
-- Common normalized event schema
-- Shared relevance and marketing classification layer
-
-The system should support adding future sources such as RSS feeds, official APIs, Microsoft Learn pages, vendor advisories, or curated allowlisted URLs.
-
-## Acceptance criteria addition
-
-The implementation must be considered incomplete unless:
-
-1. The digest can include Microsoft-relevant items from sources beyond the currently implemented source list.
-2. Each item includes `microsoft_relevant`, `microsoft_relevance_reason`, and `affected_microsoft_products` where applicable.
-3. Each item includes `source_confidence`.
-4. Third-party items are handled with stricter publication guardrails.
-5. Generic cybersecurity news without a Microsoft-specific angle is excluded by default.
-6. The README documents how new Microsoft-relevant sources can be added.
-7. Tests cover:
-   - official Microsoft source inclusion;
-   - third-party Microsoft-specific inclusion;
-   - generic non-Microsoft security news exclusion;
-   - third-party source requiring review;
-   - source confidence assignment.
-
-## Compact addition to the original Codex task
-
-Place this under the Objective section:
-
-```markdown
-The system must support sources beyond the currently implemented ones. The scope is Microsoft-relevant security news for marketing purposes, not only Microsoft-owned sources and not generic cybersecurity news. Third-party sources are allowed when the item clearly affects Microsoft products, Microsoft cloud services, Microsoft security customers, or Microsoft security positioning.
+```json
+{
+  "effective_at": "2026-05-14T07:00:16Z",
+  "effective_at_source": "last_seen_at"
+}
 ```
 
-Place this under Implementation constraints:
+Effective timestamp source:
 
-```markdown
-Do not hardcode the source list as final. Implement the source layer so additional Microsoft-relevant sources can be added later with minimal changes. Use source metadata and relevance classification to decide whether an item belongs in the marketing digest.
+| time_mode | effective_at_source |
+|---|---|
+| `changed` | `last_changed_at` |
+| `new` | `first_seen_at` |
+| `seen` | `last_seen_at` |
+| `new_or_changed` | `first_seen_at` or `last_changed_at`, whichever is newer |
+
+## Add API/database diagnostics
+
+Add a debug endpoint or debug mode.
+
+Preferred:
+
+```http
+GET /digest/debug?hours=48&ga_only=false&security_only=false
 ```
 
-## Design recommendation
+The debug output must show counts by source for each stage.
 
-Make Microsoft relevance a separate classifier next to `security_relevant` and `marketing_relevant`. This prevents generic security news from entering the marketing digest without a clear Microsoft angle.
+Required structure:
+
+```json
+{
+  "generated_at": "2026-05-14T19:00:00Z",
+  "window_hours": 48,
+  "cutoff": "2026-05-12T19:00:00Z",
+  "database_connection": {
+    "host": "ms-changes-postgres",
+    "database": "collector"
+  },
+  "time_modes": {
+    "changed": {
+      "total": 0,
+      "by_source": {}
+    },
+    "new": {
+      "total": 0,
+      "by_source": {}
+    },
+    "seen": {
+      "total": 119,
+      "by_source": {
+        "graph_message_center": 100,
+        "defender_whatsnew": 12,
+        "entra_whatsnew": 6,
+        "intune_whatsnew": 1
+      }
+    },
+    "new_or_changed": {
+      "total": 0,
+      "by_source": {}
+    }
+  },
+  "selected_mode_pipeline": {
+    "before_filters": {
+      "total": 119,
+      "by_source": {}
+    },
+    "after_time_filter": {
+      "total": 119,
+      "by_source": {}
+    },
+    "after_security_filter": {
+      "total": 119,
+      "by_source": {}
+    },
+    "after_ga_filter": {
+      "total": 119,
+      "by_source": {}
+    },
+    "after_marketing_filter": {
+      "total": 119,
+      "by_source": {}
+    },
+    "after_limit": {
+      "total": 119,
+      "by_source": {}
+    }
+  }
+}
+```
+
+The exact structure can differ, but it must show:
+
+- database used by the API;
+- cutoff timestamp;
+- selected filters;
+- counts before and after each filter;
+- counts grouped by source.
+
+## Verify API uses the same database as manual psql
+
+Add logging or debug output that confirms:
+
+- database host;
+- database name;
+- database user, if safe;
+- current database time;
+- application UTC time;
+- count of total events.
+
+Do not expose passwords or secrets.
+
+Example:
+
+```json
+{
+  "database": {
+    "host": "ms-changes-postgres",
+    "name": "collector",
+    "server_now": "2026-05-14T19:00:00Z",
+    "total_events": 119
+  }
+}
+```
+
+This prevents troubleshooting the wrong database/container.
+
+## Manual SQL equivalence checks
+
+The API must be validated against these SQL queries.
+
+### changed
+
+```sql
+SELECT source, COUNT(*)
+FROM events
+WHERE last_changed_at >= NOW() - INTERVAL '48 hours'
+GROUP BY source
+ORDER BY COUNT(*) DESC;
+```
+
+Equivalent API:
+
+```http
+GET /digest?hours=48&time_mode=changed&ga_only=false&security_only=false&limit=1000
+```
+
+### new
+
+```sql
+SELECT source, COUNT(*)
+FROM events
+WHERE first_seen_at >= NOW() - INTERVAL '48 hours'
+GROUP BY source
+ORDER BY COUNT(*) DESC;
+```
+
+Equivalent API:
+
+```http
+GET /digest?hours=48&time_mode=new&ga_only=false&security_only=false&limit=1000
+```
+
+### seen
+
+```sql
+SELECT source, COUNT(*)
+FROM events
+WHERE last_seen_at >= NOW() - INTERVAL '48 hours'
+GROUP BY source
+ORDER BY COUNT(*) DESC;
+```
+
+Equivalent API:
+
+```http
+GET /digest?hours=48&time_mode=seen&ga_only=false&security_only=false&limit=1000
+```
+
+### new_or_changed
+
+```sql
+SELECT source, COUNT(*)
+FROM events
+WHERE first_seen_at >= NOW() - INTERVAL '48 hours'
+   OR last_changed_at >= NOW() - INTERVAL '48 hours'
+GROUP BY source
+ORDER BY COUNT(*) DESC;
+```
+
+Equivalent API:
+
+```http
+GET /digest?hours=48&time_mode=new_or_changed&ga_only=false&security_only=false&limit=1000
+```
+
+## Tests required
+
+Add or update tests for API result consistency.
+
+### Test: hours is not capped at 24
+
+Create events with timestamps:
+
+- now - 12 hours
+- now - 36 hours
+- now - 60 hours
+
+Expected:
+
+- `hours=24` returns only 12h event.
+- `hours=48` returns 12h and 36h events.
+- `hours=72` returns 12h, 36h, and 60h events.
+
+### Test: seen mode uses last_seen_at
+
+Fixture:
+
+```text
+first_seen_at = now - 10 days
+last_changed_at = now - 10 days
+last_seen_at = now - 1 hour
+```
+
+Expected:
+
+- included in `time_mode=seen&hours=24`
+- excluded from `time_mode=changed&hours=24`
+- excluded from `time_mode=new&hours=24`
+- excluded from `time_mode=new_or_changed&hours=24`
+
+### Test: changed mode uses last_changed_at
+
+Fixture:
+
+```text
+first_seen_at = now - 10 days
+last_changed_at = now - 1 hour
+last_seen_at = now - 1 hour
+```
+
+Expected:
+
+- included in `changed`
+- included in `seen`
+- included in `new_or_changed`
+- excluded from `new`
+
+### Test: new mode uses first_seen_at
+
+Fixture:
+
+```text
+first_seen_at = now - 1 hour
+last_changed_at = now - 10 days
+last_seen_at = now - 1 hour
+```
+
+Expected:
+
+- included in `new`
+- included in `seen`
+- included in `new_or_changed`
+- excluded from `changed`
+
+### Test: boolean parsing
+
+Validate:
+
+```http
+/digest?security_only=false&ga_only=false
+```
+
+does not apply security or GA filtering.
+
+Validate:
+
+```http
+/digest?security_only=true&ga_only=true
+```
+
+does apply both filters.
+
+Validate invalid values return HTTP 400:
+
+```http
+/digest?security_only=maybe
+/digest?ga_only=banana
+```
+
+### Test: limit applied last
+
+Create 20 events, 10 within the time window and 10 outside.
+
+Request:
+
+```http
+/digest?hours=24&limit=5
+```
+
+Expected:
+
+- filter to 10 valid events first;
+- return 5 due to limit;
+- count metadata should clearly indicate final count or include both `matched_count` and `returned_count`.
+
+Preferred metadata:
+
+```json
+{
+  "matched_count": 10,
+  "returned_count": 5
+}
+```
+
+## Response count semantics
+
+Clarify and implement count semantics.
+
+Preferred:
+
+```json
+{
+  "matched_count": 119,
+  "returned_count": 100,
+  "limit": 100
+}
+```
+
+If existing API only has `count`, ensure it reflects returned items and add `matched_count` to avoid ambiguity.
+
+## Backward compatibility
+
+Do not break existing consumers.
+
+If existing clients expect `count`, keep `count`.
+
+Add new fields instead of removing old ones:
+
+- `matched_count`
+- `returned_count`
+- `time_mode`
+- `cutoff`
+- `effective_at`
+- `effective_at_source`
+
+## Documentation update
+
+Update README with:
+
+```markdown
+## Digest API time filtering
+
+The API uses internal collector timestamps for time-window filtering.
+
+| Mode | Timestamp field |
+|---|---|
+| `changed` | `last_changed_at` |
+| `new` | `first_seen_at` |
+| `seen` | `last_seen_at` |
+| `new_or_changed` | `first_seen_at OR last_changed_at` |
+
+Examples:
+
+```bash
+curl "http://localhost:8088/digest?hours=48&time_mode=seen&security_only=false&ga_only=false&limit=1000"
+curl "http://localhost:8088/digest?hours=48&time_mode=changed&security_only=false&ga_only=false&limit=1000"
+```
+
+`published_at` and `updated_at` are source-provided text fields and are not used as the primary API time filters.
+```
+
+## Acceptance criteria
+
+This task is complete only when all of the following are true:
+
+1. API results match equivalent PostgreSQL queries for:
+   - `changed`
+   - `new`
+   - `seen`
+   - `new_or_changed`
+
+2. `hours=48` works and is not silently capped at 24.
+
+3. `hours=72` and `hours=168` work unless explicitly rejected with HTTP 400.
+
+4. `security_only=false` and `ga_only=false` are parsed as false, not truthy strings.
+
+5. `limit` is applied after filtering, not before.
+
+6. The API does not use `published_at` or `updated_at` as the main time filter.
+
+7. API response includes:
+   - `window_hours`
+   - `time_mode`
+   - `cutoff`
+   - `matched_count`
+   - `returned_count`
+   - `limit`
+
+8. Each item includes:
+   - `effective_at`
+   - `effective_at_source`
+
+9. `/digest/debug` or equivalent debug mode proves why items are included or excluded.
+
+10. The debug output confirms the API is connected to the same database being inspected manually.
+
+11. Tests cover:
+   - 24h versus 48h versus 72h windows;
+   - all time modes;
+   - boolean parsing;
+   - limit applied after filtering;
+   - records with empty `published_at` and `updated_at`.
+
+## Final instruction
+
+Do not only patch the visible symptom.
+
+Trace the full request path:
+
+```text
+HTTP query parameters
+  → parsing/validation
+  → computed cutoff
+  → database query construction
+  → filter order
+  → sorting
+  → limit
+  → response serialization
+```
+
+Then implement the smallest clean change set that makes API/web results consistent with PostgreSQL.
