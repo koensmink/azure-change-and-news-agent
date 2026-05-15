@@ -1,10 +1,11 @@
 from html import escape
+from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 
 from .config import DEFAULT_GA_ONLY
-from .db import init_db, query_events
+from .db import IS_POSTGRES, DATABASE_URL, get_conn, init_db, query_events
 from .digest import build_digest
 
 app = FastAPI(title="Microsoft Changes Collector", version="1.0")
@@ -27,17 +28,41 @@ def events(
     ga_only: bool = Query(DEFAULT_GA_ONLY),
     limit: int = Query(100, ge=1, le=500),
 ):
-    return {"items": query_events(since_iso=since, security_only=security_only, ga_only=ga_only, limit=limit)}
+    cutoff = datetime.fromisoformat(since.replace("Z", "+00:00")) if since else None
+    return {"items": query_events(cutoff=cutoff, time_mode="changed", security_only=security_only, ga_only=ga_only, limit=limit)}
 
 
 @app.get("/digest")
-def digest(
-    hours: int = Query(24, ge=1, le=168),
-    security_only: bool = Query(True),
-    ga_only: bool = Query(DEFAULT_GA_ONLY),
-    limit: int = Query(200, ge=1, le=500),
-):
-    return build_digest(hours=hours, security_only=security_only, ga_only=ga_only, limit=limit)
+def digest(request: Request):
+    qp = request.query_params
+    hours = parse_int("hours", qp.get("hours"), 24, 1, 168)
+    limit = parse_int("limit", qp.get("limit"), 200, 1, 10000)
+    security_only = parse_bool("security_only", qp.get("security_only"), False)
+    ga_only = parse_bool("ga_only", qp.get("ga_only"), DEFAULT_GA_ONLY)
+    marketing_only = parse_bool("marketing_only", qp.get("marketing_only"), False)
+    include_review_required = parse_bool("include_review_required", qp.get("include_review_required"), True)
+    time_mode = qp.get("time_mode", "changed")
+    if time_mode not in {"changed", "new", "seen", "new_or_changed"}:
+        raise HTTPException(status_code=400, detail=f"Invalid time_mode: {time_mode}")
+    return build_digest(hours=hours, security_only=security_only, ga_only=ga_only, marketing_only=marketing_only, include_review_required=include_review_required, limit=limit, time_mode=time_mode)
+
+
+@app.get("/digest/debug")
+def digest_debug(request: Request):
+    payload = digest(request)
+    with get_conn() as conn:
+        total_events = conn.execute("SELECT COUNT(*) AS c FROM events").fetchone()["c"]
+        server_now = conn.execute("SELECT NOW() AS now" if IS_POSTGRES else "SELECT datetime('now') AS now").fetchone()["now"]
+    db_name = DATABASE_URL.split("/")[-1].split("?")[0] if DATABASE_URL else str("sqlite")
+    db_host = DATABASE_URL.split("@")[1].split("/")[0] if "@" in DATABASE_URL else "local"
+    payload["database"] = {
+        "host": db_host,
+        "name": db_name,
+        "server_now": str(server_now),
+        "app_now_utc": datetime.now(timezone.utc).isoformat(),
+        "total_events": total_events,
+    }
+    return payload
 
 
 @app.get("/events/web", response_class=HTMLResponse)
@@ -47,7 +72,8 @@ def events_web(
     ga_only: bool = Query(DEFAULT_GA_ONLY),
     limit: int = Query(100, ge=1, le=500),
 ):
-    items = query_events(since_iso=since, security_only=security_only, ga_only=ga_only, limit=limit)
+    cutoff = datetime.fromisoformat(since.replace("Z", "+00:00")) if since else None
+    items = query_events(cutoff=cutoff, time_mode="changed", security_only=security_only, ga_only=ga_only, limit=limit)
 
     rows = []
     for it in items:
@@ -142,3 +168,24 @@ def events_web(
     """
 
     return html
+def parse_bool(name: str, value: str | None, default: bool) -> bool:
+    if value is None:
+        return default
+    v = value.strip().lower()
+    if v in {"true", "1", "yes", "on"}:
+        return True
+    if v in {"false", "0", "no", "off"}:
+        return False
+    raise HTTPException(status_code=400, detail=f"Invalid boolean for {name}: {value}")
+
+
+def parse_int(name: str, value: str | None, default: int, min_v: int, max_v: int) -> int:
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid integer for {name}: {value}") from exc
+    if parsed < min_v or parsed > max_v:
+        raise HTTPException(status_code=400, detail=f"{name} must be between {min_v} and {max_v}")
+    return parsed

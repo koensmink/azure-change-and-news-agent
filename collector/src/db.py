@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 DB_PATH = Path("/app/data/events.db")
@@ -273,18 +274,59 @@ def upsert_event(event: dict):
         return change_type
 
 
-def query_events(since_iso: str | None = None, security_only: bool = False, ga_only: bool = False, limit: int = 100):
+def _to_utc(dt_val):
+    if dt_val is None:
+        return None
+    if isinstance(dt_val, datetime):
+        if dt_val.tzinfo is None:
+            return dt_val.replace(tzinfo=timezone.utc)
+        return dt_val.astimezone(timezone.utc)
+    return dt_val
+
+
+def query_events(
+    cutoff: datetime | None = None,
+    time_mode: str = "changed",
+    security_only: bool = False,
+    ga_only: bool = False,
+    marketing_only: bool = False,
+    include_review_required: bool = True,
+    limit: int = 100,
+):
+    cutoff = _to_utc(cutoff)
     if IS_POSTGRES:
         q = "SELECT * FROM events WHERE 1=1"
         args = []
-        if since_iso:
-            q += " AND (published_at >= %s OR updated_at >= %s OR last_changed_at::text >= %s)"
-            args += [since_iso, since_iso, since_iso]
+        if cutoff:
+            if time_mode == "changed":
+                q += " AND last_changed_at >= %s"
+                args.append(cutoff)
+            elif time_mode == "new":
+                q += " AND first_seen_at >= %s"
+                args.append(cutoff)
+            elif time_mode == "seen":
+                q += " AND last_seen_at >= %s"
+                args.append(cutoff)
+            elif time_mode == "new_or_changed":
+                q += " AND (first_seen_at >= %s OR last_changed_at >= %s)"
+                args += [cutoff, cutoff]
         if security_only:
             q += " AND security_relevant = 1"
         if ga_only:
             q += " AND release_stage = 'GA'"
-        q += " ORDER BY COALESCE(updated_at, published_at, last_changed_at::text) DESC LIMIT %s"
+        if marketing_only:
+            q += " AND category = 'Marketing'"
+        if not include_review_required:
+            q += " AND (publication_guardrail IS NULL OR publication_guardrail = '' OR publication_guardrail NOT LIKE '%review%')"
+        if time_mode == "changed":
+            q += " ORDER BY last_changed_at DESC"
+        elif time_mode == "new":
+            q += " ORDER BY first_seen_at DESC"
+        elif time_mode == "seen":
+            q += " ORDER BY last_seen_at DESC"
+        else:
+            q += " ORDER BY GREATEST(first_seen_at, last_changed_at) DESC"
+        q += " LIMIT %s"
         args.append(limit)
 
         with get_conn() as conn:
@@ -293,14 +335,37 @@ def query_events(since_iso: str | None = None, security_only: bool = False, ga_o
 
     q = "SELECT * FROM events WHERE 1=1"
     args = []
-    if since_iso:
-        q += " AND (published_at >= ? OR updated_at >= ? OR last_changed_at >= ?)"
-        args += [since_iso, since_iso, since_iso]
+    if cutoff:
+        cutoff_iso = cutoff.isoformat()
+        if time_mode == "changed":
+            q += " AND last_changed_at >= ?"
+            args.append(cutoff_iso)
+        elif time_mode == "new":
+            q += " AND first_seen_at >= ?"
+            args.append(cutoff_iso)
+        elif time_mode == "seen":
+            q += " AND last_seen_at >= ?"
+            args.append(cutoff_iso)
+        elif time_mode == "new_or_changed":
+            q += " AND (first_seen_at >= ? OR last_changed_at >= ?)"
+            args += [cutoff_iso, cutoff_iso]
     if security_only:
         q += " AND security_relevant = 1"
     if ga_only:
         q += " AND release_stage = 'GA'"
-    q += " ORDER BY COALESCE(updated_at, published_at, last_changed_at) DESC LIMIT ?"
+    if marketing_only:
+        q += " AND category = 'Marketing'"
+    if not include_review_required:
+        q += " AND (publication_guardrail IS NULL OR publication_guardrail = '' OR publication_guardrail NOT LIKE '%review%')"
+    if time_mode == "changed":
+        q += " ORDER BY last_changed_at DESC"
+    elif time_mode == "new":
+        q += " ORDER BY first_seen_at DESC"
+    elif time_mode == "seen":
+        q += " ORDER BY last_seen_at DESC"
+    else:
+        q += " ORDER BY CASE WHEN first_seen_at > last_changed_at THEN first_seen_at ELSE last_changed_at END DESC"
+    q += " LIMIT ?"
     args.append(limit)
 
     with get_conn() as conn:
