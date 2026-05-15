@@ -25,3 +25,23 @@ To add a new Microsoft-relevant source:
    - `affected_microsoft_products`
 
 Third-party sources must default to stricter publication guardrails and usually `requires_review`.
+
+## Digest API time filtering
+
+The API uses internal collector timestamps for time-window filtering.
+
+| Mode | Timestamp field |
+|---|---|
+| `changed` | `last_changed_at` |
+| `new` | `first_seen_at` |
+| `seen` | `last_seen_at` |
+| `new_or_changed` | `first_seen_at OR last_changed_at` |
+
+Examples:
+
+```bash
+curl "http://localhost:8088/digest?hours=48&time_mode=seen&security_only=false&ga_only=false&limit=1000"
+curl "http://localhost:8088/digest?hours=48&time_mode=changed&security_only=false&ga_only=false&limit=1000"
+```
+
+`published_at` and `updated_at` are source-provided text fields and are not used as the primary API time filters.
